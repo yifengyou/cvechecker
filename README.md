@@ -24,6 +24,7 @@ to detect the revision itself).
 * 官方文档：<https://github.com/sjvermeu/cvechecker/wiki>
 * 安装指南：<https://github.com/sjvermeu/cvechecker/wiki/Installation>
 * Fedora仓库：<https://src.fedoraproject.org/rpms/cvechecker>
+* Fedora Bugz：<https://bugz.fedoraproject.org/cvechecker>
 
 
 ## 目录
@@ -36,14 +37,36 @@ to detect the revision itself).
 * [cvechecker源码分析](docs/cvechecker源码分析.md)
 
 
+## 快速入门
+
+```
+#!/bin/bash
+
+yum install -y cvechecker wget binutils libxslt
+
+cvechecker -i
+
+pullcves pull
+
+find / ! -path /proc -type f -perm -o+x -print 2>/dev/null 1> scanlist.txt
+
+echo /proc/version >> scanlist.txt
+
+cvechecker -b scanlist.txt
+cvechecker -r
+
+echo "All done!"
+```
+
 
 ## 图示
 
+![20221219_205111_94](image/20221219_205111_94.png)
 
 
+![20221219_205146_77](image/20221219_205146_77.png)
 
-
-
+![20221219_205130_87](image/20221219_205130_87.png)
 
 
 
