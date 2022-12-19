@@ -1,0 +1,195 @@
+#!/bin/sh
+
+if [ $# -ne 1 ]
+then
+  echo "Usage: $0 pull"
+  echo "       $0 cleancache"
+  exit 1
+fi
+
+die() {
+  echo "*** $*"
+  exit 1
+}
+
+CONFFILE=""
+if [ -n "${CVECHECKER_CONFFILE}" ]
+then
+  if [ -f "${CVECHECKER_CONFFILE}" ]
+  then
+    CONFFILE="${CVECHECKER_CONFFILE}"
+  else
+    die "File ${CVECHECKER_CONFILE} specified in CVECHECKER_CONFFILE environment variable does not exist."
+  fi
+elif [ -f ~/.cvechecker.rc ]
+then
+  CONFFILE=~/.cvechecker.rc
+elif [ -f /usr/local/etc/cvechecker.conf ]
+then
+  CONFFILE=/usr/local/etc/cvechecker.conf
+elif [ -f /etc/cvechecker.conf ]
+then
+  CONFFILE=/etc/cvechecker.conf
+fi
+
+if [ ! -f "${CONFFILE}" ]
+then
+  die "Configuration file ${CONFFILE} does not exist."
+fi
+
+xsltproc -V > /dev/null 2>&1
+if [ $? -ne 0 ]
+then
+  echo "This script requires xsltproc to be available on the system and reachable in a directory mentioned in the PATH variable."
+  exit 1
+fi
+
+wget -V > /dev/null 2>&1
+if [ $? -ne 0 ]
+then
+  echo "This script requires wget to be available on the system and reachable in a directory mentioned in the PATH variable."
+  exit 1
+fi
+
+jq -V > /dev/null 2>&1
+if [ $? -ne 0 ]
+then
+  echo "This script requires jq (version 1.6 or higher) to be available on the system and reachable in a directory mentioned in the PATH variable."
+  exit 1
+fi
+
+if [ -z "${WGET_TIMEOUT}" ]
+then
+  # timeout in seconds for wget. Does not affect the
+  # download time once download has been initiated.
+  WGET_TIMEOUT=60
+fi
+
+if [ -z "${WGET_TRIES}" ]
+then
+  # amount of wget tries after timeout
+  WGET_TRIES=2
+fi
+
+if [ -z "${WGETCMD}" ]
+then
+  WGETCMD="wget --timeout=${WGET_TIMEOUT} --tries=${WGET_TRIES} --quiet"
+fi
+
+DATADIR=$(awk -F'=' '/^datadir/ {print $2}' ${CONFFILE} | awk -F'"' '{print $2}')
+CVECACHE=$(awk -F'=' '/^cvecache/ {print $2}' ${CONFFILE} | awk -F'"' '{print $2}')
+DLLOCATION=$(awk -F'=' '/^version_url/ {print $2}' ${CONFFILE} | awk -F'"' '{print $2}')
+DLCVE=0
+DLDAT=0
+COMMAND=$1
+CKSUM=0
+URLBASE="https://nvd.nist.gov/feeds/json/cve/1.1/"
+
+if [ "${COMMAND}" = "pull" ]
+then
+
+for YEAR in $(seq -w 02 `date +%y`)
+do
+  if [ ! -f ${CVECACHE}/nvdcve-1.1-20${YEAR}.json.gz ]
+  then
+    printf "Downloading nvdcve-1.1-20${YEAR}.json.gz... "
+    ${WGETCMD} -O ${CVECACHE}/nvdcve-1.1-20${YEAR}.json.gz ${URLBASE}/nvdcve-1.1-20${YEAR}.json.gz
+    ret=$?
+    if [ ${ret} -ne 0 ]
+    then
+      echo "Error: wget returned with ${ret}. Continue with next year.."
+      continue
+    fi
+
+    printf "ok\n"
+    # force next step
+    rm -f ${CVECACHE}/nvdcve-1.1-20${YEAR}.csv
+  fi
+  if [ ! -f ${CVECACHE}/nvdcve-1.1-20${YEAR}.csv -o ! -s ${CVECACHE}/nvdcve-1.1-20${YEAR}.csv ]
+  then
+    printf "Converting nvdcve-1.1-20${YEAR}.json to CSV... "
+    zcat ${CVECACHE}/nvdcve-1.1-20${YEAR}.json.gz > ${CVECACHE}/nvdcve-1.1-20${YEAR}.json
+    # Here we try to obtain the CPE information from the CVE. The script 
+    # currently does not attempt to find the most accurate one, but rather
+    # attempts to find all referenced CPEs. This is not always correct sadly,
+    # and we might want to have a more intelligent parser for the JSON
+    # information later.
+    jq -r '.CVE_Items[] as $entry | $entry.configurations | .. | .cpe23Uri? as $cpe | .versionEndExcluding? as $cpeFixVersion | [$entry.cve.CVE_data_meta.ID, $entry.impact.baseMetricV2.cvssV2.baseScore?, $entry.impact.baseMetricV3.cvssV3.baseScore?] + [$cpe] + [$cpeFixVersion] | @csv' ${CVECACHE}/nvdcve-1.1-20${YEAR}.json > ${CVECACHE}/nvdcve-1.1-20${YEAR}.csv
+    # Remove quotes if present as current cvechecker code does not deal with it properly
+    sed -i -e 's:"::g' ${CVECACHE}/nvdcve-1.1-20${YEAR}.csv 
+    printf "ok\nLoading in nvdcve-1.1-20${YEAR}.csv in cvechecker.\n"
+    cvechecker -c ${CVECACHE}/nvdcve-1.1-20${YEAR}.csv || die "Could not import nvdcve-1.1-20${YEAR}.csv"
+  fi
+done
+
+cd ${CVECACHE}
+if [ ! -f nvdcve-1.1-Modified.json.gz ]
+then
+  CKSUM="1"
+else
+  CKSUM=$(cksum nvdcve-1.1-Modified.json.gz 2>/dev/null)
+fi
+printf "Downloading nvdcve-1.1-Modified.json.gz... "
+${WGETCMD} -N -O nvdcve-1.1-Modified.json.gz ${URLBASE}/nvdcve-1.1-Modified.json.gz
+ret=$?
+if [ ${ret} -ne 0 ]
+then
+  echo "Error: wget returned with ${ret}."
+  continue
+fi
+
+CKSUM2=$(cksum nvdcve-1.1-Modified.json.gz 2>/dev/null)
+if [ "${CKSUM2}" != "${CKSUM}" ]
+then
+  printf "ok (downloaded)\n"
+  printf "Converting nvdcve-1.1-Modified.json to CSV... "
+  if [ -f ${CVECACHE}/nvdcve-1.1-modified.csv ]
+  then
+    mv ${CVECACHE}/nvdcve-1.1-modified.csv ${CVECACHE}/nvdcve-1.1-modified.csv.old
+  else
+    touch ${CVECACHE}/nvdcve-1.1-modified.csv.old
+  fi
+  zcat nvdcve-1.1-Modified.json.gz > ${CVECACHE}/nvdcve-1.1-Modified.json
+  jq -r '.CVE_Items[] as $entry | $entry.configurations | .. | .cpe23Uri? as $cpe | .versionEndExcluding? as $cpeFixVersion | [$entry.cve.CVE_data_meta.ID, $entry.impact.baseMetricV2.cvssV2.baseScore?, $entry.impact.baseMetricV3.cvssV3.baseScore?] + [$cpe] + [$cpeFixVersion] | @csv' ${CVECACHE}/nvdcve-1.1-Modified.json > ${CVECACHE}/nvdcve-1.1-modified.csv
+  # Remove quotes if present as current cvechecker code does not deal with it properly
+  sed -i -e 's:"::g' ${CVECACHE}/nvdcve-1.1-modified.csv
+  
+  printf "ok\nGathering differences with last pull... "
+  diff ${CVECACHE}/nvdcve-1.1-modified.csv.old ${CVECACHE}/nvdcve-1.1-modified.csv | sed -ne '/^>/s:^> ::p' > ${CVECACHE}/nvdcve-1.1-modified.delta
+
+  printf "ok\nLoading in nvdcve-1.1-modified.csv differences in cvechecker.\n"
+  cvechecker -c ${CVECACHE}/nvdcve-1.1-modified.delta || die "Could not import nvdcve-1.1-modified.delta"
+  DLCVE=1
+else
+  printf "ok (not downloaded, same file)\n"
+fi
+
+CKSUM=$(cksum versions.dat 2>/dev/null)
+printf "Downloading versions.dat... "
+${WGETCMD} -N -O versions.dat ${DLLOCATION}
+CKSUM2=$(cksum versions.dat 2>/dev/null)
+if [ "${CKSUM}" != "${CKSUM2}" ]
+then
+  printf "ok (downloaded)\n"
+  printf "Loading in versions.dat in cvechecker.\n"
+  cvechecker -l ${CVECACHE}/versions.dat || die "Could not load versions.dat"
+  DLDAT=2
+else
+  printf "ok (not downloaded, same file)\n"
+fi
+
+exit $((${DLCVE} + ${DLDAT}))
+
+elif [ "${COMMAND}" = "cleancache" ]
+then
+  rm ${CVECACHE}/*.json.cz
+  rm ${CVECACHE}/*.json
+  rm ${CVECACHE}/*.xml.gz
+  rm ${CVECACHE}/*.csv
+  rm ${CVECACHE}/*.old 2>/dev/null
+  rm ${CVECACHE}/*.delta 2>/dev/null
+  rm ${CVECACHE}/versions.dat 2>/dev/null
+else
+  echo "Sorry, command \"${COMMAND}\" is not supported."
+  exit 1
+fi
