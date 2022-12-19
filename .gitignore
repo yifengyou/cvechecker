@@ -1,3 +1,8 @@
+RPMS
+SRPMS
+BUILDROOT
+/push-*
+
 # Prerequisites
 *.d
 
